@@ -1,590 +1,1301 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import os
-import time
-import joblib
-import psutil
 import sqlite3
+import psutil
+import os
 import subprocess
 import sys
-from datetime import datetime
+import time
 
 
-# ==================================================
-# FILE PATHS
-# ==================================================
-
-DATABASE_FILE = "data/system_metrics.db"
-
-CPU_MODEL_FILE = "models/cpu_prediction_model.pkl"
-
-ANOMALY_MODEL_FILE = "models/anomaly_model.pkl"
-
-
-# ==================================================
-# PAGE CONFIGURATION
-# ==================================================
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
     page_title="AI System Monitor",
-    page_icon="📊",
-    layout="wide"
+    page_icon="🖥️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 
-# ==================================================
-# TITLE
-# ==================================================
+# ============================================================
+# DATABASE PATHS
+# ============================================================
 
-st.title("AI-Powered Real-Time System Monitor")
+DATABASE_FILE = "data/system_metrics.db"
+CPU_MODEL_FILE = "models/cpu_prediction_model.pkl"
+ANOMALY_MODEL_FILE = "models/anomaly_model.pkl"
 
-st.caption(
-    "Real-time monitoring with AI prediction, "
-    "anomaly detection, process analysis and SQLite"
+
+# ============================================================
+# CUSTOM STREAMLIT CSS
+# No HTML cards are used.
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .stApp {
+        background-color: #080c14;
+    }
+
+    [data-testid="stSidebar"] {
+        background-color: #0c111b;
+        border-right: 1px solid #202938;
+    }
+
+    .block-container {
+        max-width: 1500px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+
+    h1 {
+        font-size: 2.4rem !important;
+        font-weight: 800 !important;
+    }
+
+    h2 {
+        font-size: 1.5rem !important;
+        font-weight: 750 !important;
+    }
+
+    h3 {
+        font-size: 1.1rem !important;
+        font-weight: 700 !important;
+    }
+
+    div[data-testid="stMetric"] {
+        background-color: #111722;
+        border: 1px solid #273244;
+        border-radius: 16px;
+        padding: 18px;
+        min-height: 130px;
+    }
+
+    div[data-testid="stMetricLabel"] {
+        color: #94a3b8;
+    }
+
+    div[data-testid="stMetricValue"] {
+        color: #f8fafc;
+        font-weight: 800;
+    }
+
+    div[data-testid="stMetricDelta"] {
+        font-size: 0.85rem;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: #0f1520;
+        border: 1px solid #202b3d;
+        border-radius: 16px;
+    }
+
+    .stButton > button {
+        border-radius: 10px;
+        min-height: 42px;
+        font-weight: 650;
+    }
+
+    .stProgress > div > div > div > div {
+        border-radius: 10px;
+    }
+
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #202b3d;
+        border-radius: 14px;
+        overflow: hidden;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
 
-# ==================================================
-# CHECK DATABASE
-# ==================================================
+# ============================================================
+# DATABASE
+# ============================================================
 
-if not os.path.exists(DATABASE_FILE):
-
-    st.warning("SQLite database not found.")
-
-    st.info(
-        "Start the monitoring script first:\n\n"
-        "python -m monitoring.system_metrics"
-    )
-
-    st.stop()
+def get_connection():
+    return sqlite3.connect(DATABASE_FILE)
 
 
-# ==================================================
-# LOAD SQLITE DATA
-# ==================================================
+@st.cache_data(ttl=3)
+def load_metrics(limit=150):
 
-try:
+    if not os.path.exists(DATABASE_FILE):
+        return pd.DataFrame()
 
-    connection = sqlite3.connect(
-        DATABASE_FILE
-    )
+    connection = get_connection()
 
     query = """
-    SELECT
-        timestamp,
-        cpu,
-        ram,
-        disk,
-        bytes_sent,
-        bytes_received
-    FROM system_metrics
-    ORDER BY id
+        SELECT
+            timestamp,
+            cpu,
+            ram,
+            disk,
+            bytes_sent,
+            bytes_received
+        FROM system_metrics
+        ORDER BY id DESC
+        LIMIT ?
     """
 
     df = pd.read_sql_query(
         query,
-        connection
+        connection,
+        params=(limit,)
     )
 
     connection.close()
 
-except Exception as e:
+    if df.empty:
+        return df
 
-    st.error(
-        f"Database error: {e}"
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"]
     )
 
-    st.stop()
+    df = df.sort_values(
+        "timestamp"
+    ).reset_index(drop=True)
+
+    return df
 
 
-# ==================================================
-# CHECK DATA
-# ==================================================
+def get_total_records():
+
+    if not os.path.exists(DATABASE_FILE):
+        return 0
+
+    connection = get_connection()
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM system_metrics"
+    )
+
+    result = cursor.fetchone()[0]
+
+    connection.close()
+
+    return result
+
+
+# ============================================================
+# SYSTEM STATUS
+# ============================================================
+
+def resource_status(
+    value,
+    warning,
+    critical
+):
+
+    if value >= critical:
+        return "CRITICAL"
+
+    if value >= warning:
+        return "WARNING"
+
+    return "NORMAL"
+
+
+def calculate_risk(
+    cpu,
+    ram,
+    disk,
+    anomaly
+):
+
+    if anomaly or cpu >= 90 or ram >= 90:
+        return "CRITICAL"
+
+    if cpu >= 70 or ram >= 80 or disk >= 90:
+        return "WARNING"
+
+    return "NORMAL"
+
+
+def calculate_health(
+    cpu,
+    ram,
+    disk,
+    anomaly
+):
+
+    score = 100
+
+    if cpu >= 90:
+        score -= 30
+
+    elif cpu >= 70:
+        score -= 15
+
+    if ram >= 90:
+        score -= 30
+
+    elif ram >= 80:
+        score -= 15
+
+    if disk >= 90:
+        score -= 20
+
+    if anomaly:
+        score -= 20
+
+    return max(
+        0,
+        min(100, score)
+    )
+
+
+# ============================================================
+# CPU PREDICTION
+# ============================================================
+
+def get_cpu_prediction(df):
+
+    if not os.path.exists(
+        CPU_MODEL_FILE
+    ):
+        return None
+
+    if len(df) < 70:
+        return None
+
+    try:
+
+        import joblib
+
+        model = joblib.load(
+            CPU_MODEL_FILE
+        )
+
+        data = df.copy()
+
+        data["cpu_avg"] = (
+            data["cpu"]
+            .rolling(12)
+            .mean()
+        )
+
+        data["ram_avg"] = (
+            data["ram"]
+            .rolling(12)
+            .mean()
+        )
+
+        data["cpu_change"] = (
+            data["cpu"]
+            .diff()
+        )
+
+        data["ram_change"] = (
+            data["ram"]
+            .diff()
+        )
+
+        data = data.dropna()
+
+        if data.empty:
+            return None
+
+        latest = data.iloc[-1]
+
+        features = pd.DataFrame([{
+            "cpu": latest["cpu"],
+            "ram": latest["ram"],
+            "disk": latest["disk"],
+            "cpu_avg": latest["cpu_avg"],
+            "ram_avg": latest["ram_avg"],
+            "cpu_change": latest["cpu_change"],
+            "ram_change": latest["ram_change"]
+        }])
+
+        prediction = model.predict(
+            features
+        )[0]
+
+        return max(
+            0,
+            min(100, float(prediction))
+        )
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# ANOMALY DETECTION
+# ============================================================
+
+def get_anomaly(df):
+
+    if not os.path.exists(
+        ANOMALY_MODEL_FILE
+    ):
+        return False
+
+    if len(df) < 20:
+        return False
+
+    try:
+
+        import joblib
+
+        model = joblib.load(
+            ANOMALY_MODEL_FILE
+        )
+
+        latest = df[
+            ["cpu", "ram", "disk"]
+        ].tail(1)
+
+        result = model.predict(
+            latest
+        )[0]
+
+        return result == -1
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# TOP PROCESSES
+# ============================================================
+
+def get_top_processes():
+
+    processes = []
+
+    try:
+
+        for process in psutil.process_iter(
+            ["pid", "name"]
+        ):
+
+            try:
+                process.cpu_percent(
+                    None
+                )
+            except:
+                pass
+
+        time.sleep(0.35)
+
+        for process in psutil.process_iter(
+            ["pid", "name", "memory_percent"]
+        ):
+
+            try:
+
+                name = process.info.get(
+                    "name"
+                )
+
+                if name == "System Idle Process":
+                    continue
+
+                cpu = process.cpu_percent(
+                    None
+                )
+
+                ram = process.info.get(
+                    "memory_percent",
+                    0
+                )
+
+                processes.append({
+                    "Process": name,
+                    "PID": process.info["pid"],
+                    "CPU %": round(
+                        cpu,
+                        1
+                    ),
+                    "RAM %": round(
+                        ram,
+                        1
+                    )
+                })
+
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess
+            ):
+                continue
+
+        processes.sort(
+            key=lambda x: x["CPU %"],
+            reverse=True
+        )
+
+        return pd.DataFrame(
+            processes[:10]
+        )
+
+    except Exception:
+
+        return pd.DataFrame()
+
+
+# ============================================================
+# RESOURCE CHART
+# ============================================================
+
+def resource_chart(
+    df,
+    column,
+    title
+):
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=df["timestamp"],
+            y=df[column],
+            mode="lines",
+            line=dict(
+                width=2.5
+            ),
+            fill="tozeroy",
+            hovertemplate=(
+                "%{x}<br>"
+                "%{y:.1f}%"
+                "<extra></extra>"
+            )
+        )
+    )
+
+    fig.add_hline(
+        y=70,
+        line_dash="dash",
+        annotation_text="Warning"
+    )
+
+    fig.add_hline(
+        y=90,
+        line_dash="dash",
+        annotation_text="Critical"
+    )
+
+    fig.update_layout(
+        title=title,
+        height=330,
+        margin=dict(
+            l=10,
+            r=10,
+            t=50,
+            b=10
+        ),
+        paper_bgcolor="#0f1520",
+        plot_bgcolor="#0f1520",
+        font=dict(
+            color="#cbd5e1"
+        ),
+        xaxis=dict(
+            showgrid=False
+        ),
+        yaxis=dict(
+            range=[0, 100],
+            showgrid=True,
+            gridcolor="#202938"
+        ),
+        hovermode="x unified"
+    )
+
+    return fig
+
+
+# ============================================================
+# NETWORK CHART
+# ============================================================
+
+def network_chart(df):
+
+    data = df.copy()
+
+    data["upload_mb"] = (
+        data["bytes_sent"]
+        .diff()
+        .clip(lower=0)
+        / 1024
+        / 1024
+    )
+
+    data["download_mb"] = (
+        data["bytes_received"]
+        .diff()
+        .clip(lower=0)
+        / 1024
+        / 1024
+    )
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["timestamp"],
+            y=data["upload_mb"],
+            mode="lines",
+            name="Upload"
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=data["timestamp"],
+            y=data["download_mb"],
+            mode="lines",
+            name="Download"
+        )
+    )
+
+    fig.update_layout(
+        title="Network Traffic",
+        height=330,
+        margin=dict(
+            l=10,
+            r=10,
+            t=50,
+            b=10
+        ),
+        paper_bgcolor="#0f1520",
+        plot_bgcolor="#0f1520",
+        font=dict(
+            color="#cbd5e1"
+        ),
+        xaxis=dict(
+            showgrid=False
+        ),
+        yaxis=dict(
+            title="MB",
+            showgrid=True,
+            gridcolor="#202938"
+        )
+    )
+
+    return fig
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+df = load_metrics(150)
+
+
+# ============================================================
+# NO DATA
+# ============================================================
 
 if df.empty:
 
-    st.warning(
-        "No system metrics available yet."
+    st.title(
+        "🖥️ AI System Monitor"
     )
 
-    st.info(
-        "Keep the monitoring script running."
+    st.caption(
+        "Real-Time Monitoring & Predictive Analytics"
+    )
+
+    st.warning(
+        "No monitoring data is available."
+    )
+
+    st.code(
+        "python -m monitoring.system_metrics",
+        language="cmd"
     )
 
     st.stop()
 
 
-# ==================================================
-# TIMESTAMP
-# ==================================================
+# ============================================================
+# SIDEBAR
+# ============================================================
 
-df["timestamp"] = pd.to_datetime(
-    df["timestamp"]
+with st.sidebar:
+
+    st.title(
+        "🖥️ AI Monitor"
+    )
+
+    st.caption(
+        "System Intelligence Center"
+    )
+
+    st.divider()
+
+    st.subheader(
+        "⚙️ Monitoring"
+    )
+
+    refresh_seconds = st.slider(
+        "Refresh interval",
+        3,
+        15,
+        5
+    )
+
+    history_limit = st.selectbox(
+        "History records",
+        [50, 100, 150],
+        index=2
+    )
+
+    st.divider()
+
+    st.subheader(
+        "🤖 AI Models"
+    )
+
+    if os.path.exists(
+        CPU_MODEL_FILE
+    ):
+
+        st.success(
+            "CPU Prediction Ready"
+        )
+
+    else:
+
+        st.warning(
+            "CPU Prediction Missing"
+        )
+
+    if os.path.exists(
+        ANOMALY_MODEL_FILE
+    ):
+
+        st.success(
+            "Anomaly Model Ready"
+        )
+
+    else:
+
+        st.warning(
+            "Anomaly Model Missing"
+        )
+
+    st.divider()
+
+    st.subheader(
+        "🗄️ Database"
+    )
+
+    st.metric(
+        "Records",
+        get_total_records()
+    )
+
+    if os.path.exists(
+        DATABASE_FILE
+    ):
+
+        st.success(
+            "SQLite Connected"
+        )
+
+    st.divider()
+
+    st.caption(
+        "Python • psutil • SQLite\n"
+        "Scikit-learn • Plotly • Streamlit"
+    )
+
+
+# Reload selected history
+df = load_metrics(
+    history_limit
 )
 
 latest = df.iloc[-1]
 
-
-# ==================================================
-# CURRENT VALUES
-# ==================================================
-
 cpu = float(latest["cpu"])
-
 ram = float(latest["ram"])
-
 disk = float(latest["disk"])
 
 
-# ==================================================
-# NETWORK SPEED
-# ==================================================
+# ============================================================
+# AI
+# ============================================================
 
-upload_speed = 0
-
-download_speed = 0
-
-
-if len(df) >= 2:
-
-    previous = df.iloc[-2]
-
-    time_difference = (
-        latest["timestamp"]
-        - previous["timestamp"]
-    ).total_seconds()
-
-    if time_difference > 0:
-
-        upload_speed = (
-            float(latest["bytes_sent"])
-            - float(previous["bytes_sent"])
-        ) / time_difference
-
-        download_speed = (
-            float(latest["bytes_received"])
-            - float(previous["bytes_received"])
-        ) / time_difference
-
-
-upload_kbps = max(
-    0,
-    upload_speed / 1024
+prediction = get_cpu_prediction(
+    df
 )
 
-download_kbps = max(
-    0,
-    download_speed / 1024
+anomaly = get_anomaly(
+    df
+)
+
+risk = calculate_risk(
+    cpu,
+    ram,
+    disk,
+    anomaly
+)
+
+health = calculate_health(
+    cpu,
+    ram,
+    disk,
+    anomaly
+)
+
+cpu_status = resource_status(
+    cpu,
+    70,
+    90
+)
+
+ram_status = resource_status(
+    ram,
+    80,
+    90
+)
+
+disk_status = resource_status(
+    disk,
+    90,
+    95
 )
 
 
-# ==================================================
-# CPU PREDICTION
-# ==================================================
+# ============================================================
+# HEADER
+# ============================================================
 
-prediction = None
+title_col, status_col = st.columns(
+    [5, 1]
+)
+
+with title_col:
+
+    st.title(
+        "🖥️ AI System Monitor"
+    )
+
+    st.caption(
+        "Real-Time Monitoring & Predictive Analytics"
+    )
+
+with status_col:
+
+    st.success(
+        "● LIVE"
+    )
 
 
-if (
-    os.path.exists(CPU_MODEL_FILE)
-    and len(df) >= 13
-):
+st.divider()
 
-    try:
 
-        cpu_model = joblib.load(
-            CPU_MODEL_FILE
+# ============================================================
+# SYSTEM OVERVIEW
+# ============================================================
+
+st.header(
+    "System Overview"
+)
+
+st.caption(
+    "Current resource utilization of the monitored machine."
+)
+
+c1, c2, c3, c4 = st.columns(4)
+
+
+with c1:
+
+    st.metric(
+        "CPU Usage",
+        f"{cpu:.1f}%",
+        cpu_status
+    )
+
+    st.progress(
+        min(cpu / 100, 1.0)
+    )
+
+
+with c2:
+
+    st.metric(
+        "Memory Usage",
+        f"{ram:.1f}%",
+        ram_status
+    )
+
+    st.progress(
+        min(ram / 100, 1.0)
+    )
+
+
+with c3:
+
+    st.metric(
+        "Disk Usage",
+        f"{disk:.1f}%",
+        disk_status
+    )
+
+    st.progress(
+        min(disk / 100, 1.0)
+    )
+
+
+with c4:
+
+    st.metric(
+        "System Health",
+        f"{health}/100",
+        risk
+    )
+
+    st.progress(
+        health / 100
+    )
+
+
+# ============================================================
+# AI INSIGHTS
+# ============================================================
+
+st.header(
+    "🤖 AI Insights"
+)
+
+st.caption(
+    "Machine-learning predictions and intelligent system analysis."
+)
+
+a1, a2, a3 = st.columns(3)
+
+
+with a1:
+
+    with st.container(border=True):
+
+        st.subheader(
+            "🔮 CPU Prediction"
         )
 
-        ml_df = df.copy()
+        if prediction is not None:
 
-        ml_df["cpu_avg"] = (
-            ml_df["cpu"]
-            .rolling(12)
-            .mean()
-        )
-
-        ml_df["ram_avg"] = (
-            ml_df["ram"]
-            .rolling(12)
-            .mean()
-        )
-
-        ml_df["cpu_change"] = (
-            ml_df["cpu"]
-            .diff()
-        )
-
-        ml_df["ram_change"] = (
-            ml_df["ram"]
-            .diff()
-        )
-
-        ml_df = ml_df.dropna()
-
-        if len(ml_df) > 0:
-
-            latest_ml = ml_df.iloc[-1]
-
-            features = [
-                "cpu",
-                "ram",
-                "disk",
-                "cpu_avg",
-                "ram_avg",
-                "cpu_change",
-                "ram_change"
-            ]
-
-            X_latest = (
-                latest_ml[features]
-                .to_frame()
-                .T
+            st.metric(
+                "Predicted CPU",
+                f"{prediction:.1f}%"
             )
 
-            prediction = cpu_model.predict(
-                X_latest
-            )[0]
+            if prediction >= 90:
 
-            prediction = max(
-                0,
-                min(100, prediction)
+                st.error(
+                    "Predicted CPU load is critical."
+                )
+
+            elif prediction >= 70:
+
+                st.warning(
+                    "Predicted CPU load is elevated."
+                )
+
+            else:
+
+                st.success(
+                    "Predicted CPU load is within normal range."
+                )
+
+            st.caption(
+                "Estimated CPU usage approximately 5 minutes ahead."
             )
-
-    except Exception as e:
-
-        st.warning(
-            f"CPU prediction error: {e}"
-        )
-
-
-# ==================================================
-# ANOMALY DETECTION
-# ==================================================
-
-anomaly_status = "Normal"
-
-
-if os.path.exists(ANOMALY_MODEL_FILE):
-
-    try:
-
-        anomaly_model = joblib.load(
-            ANOMALY_MODEL_FILE
-        )
-
-        anomaly_features = [
-            "cpu",
-            "ram",
-            "disk"
-        ]
-
-        X_anomaly = (
-            latest[anomaly_features]
-            .to_frame()
-            .T
-        )
-
-        anomaly_result = (
-            anomaly_model
-            .predict(X_anomaly)[0]
-        )
-
-        if anomaly_result == -1:
-
-            anomaly_status = "Anomaly Detected"
 
         else:
 
-            anomaly_status = "Normal"
+            st.info(
+                "CPU prediction model is not available."
+            )
 
-    except Exception as e:
 
-        st.warning(
-            f"Anomaly detection error: {e}"
+with a2:
+
+    with st.container(border=True):
+
+        st.subheader(
+            "🧠 Anomaly Detection"
+        )
+
+        if anomaly:
+
+            st.error(
+                "ANOMALY DETECTED"
+            )
+
+            st.write(
+                "The latest system metrics differ from learned normal patterns."
+            )
+
+        else:
+
+            st.success(
+                "SYSTEM NORMAL"
+            )
+
+            st.write(
+                "No anomaly detected in the latest measurement."
+            )
+
+        st.caption(
+            "Isolation Forest using CPU, RAM and disk."
         )
 
 
-# ==================================================
-# RISK LEVEL
-# ==================================================
+with a3:
+
+    with st.container(border=True):
+
+        st.subheader(
+            "⚡ Risk Assessment"
+        )
+
+        if risk == "CRITICAL":
+
+            st.error(
+                "CRITICAL"
+            )
+
+            st.write(
+                "Immediate attention may be required."
+            )
+
+        elif risk == "WARNING":
+
+            st.warning(
+                "WARNING"
+            )
+
+            st.write(
+                "One or more system resources are elevated."
+            )
+
+        else:
+
+            st.success(
+                "NORMAL"
+            )
+
+            st.write(
+                "System resources are within normal ranges."
+            )
+
+        st.caption(
+            "Calculated from resources and anomaly detection."
+        )
+
+
+# ============================================================
+# ALERTS
+# ============================================================
+
+st.header(
+    "🚨 System Alerts"
+)
 
 alerts = []
-
 
 if cpu >= 90:
 
     alerts.append(
-        f"CPU usage is critically high at {cpu:.1f}%."
+        f"CPU usage is critically high: {cpu:.1f}%"
     )
 
 elif cpu >= 70:
 
     alerts.append(
-        f"CPU usage is high at {cpu:.1f}%."
+        f"CPU usage is elevated: {cpu:.1f}%"
     )
-
 
 if ram >= 90:
 
     alerts.append(
-        f"RAM usage is critically high at {ram:.1f}%."
+        f"Memory usage is critically high: {ram:.1f}%"
     )
 
 elif ram >= 80:
 
     alerts.append(
-        f"RAM usage is high at {ram:.1f}%."
+        f"Memory usage is elevated: {ram:.1f}%"
     )
-
 
 if disk >= 90:
 
     alerts.append(
-        f"Disk storage usage is very high at {disk:.1f}%."
+        f"Disk usage is high: {disk:.1f}%"
     )
 
-
-if anomaly_status == "Anomaly Detected":
+if anomaly:
 
     alerts.append(
-        "AI anomaly detection identified unusual "
-        "system behavior."
+        "AI anomaly detection identified unusual system behavior."
     )
 
 
-if (
-    anomaly_status == "Anomaly Detected"
-    or cpu >= 90
-    or ram >= 90
-):
-
-    risk_level = "CRITICAL"
-
-elif (
-    cpu >= 70
-    or ram >= 80
-    or disk >= 90
-):
-
-    risk_level = "WARNING"
-
-else:
-
-    risk_level = "NORMAL"
-
-
-# ==================================================
-# CURRENT METRICS
-# ==================================================
-
-st.subheader(
-    "💻 Current System Metrics"
-)
-
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-
-with col1:
-
-    st.metric(
-        "CPU Usage",
-        f"{cpu:.1f}%"
-    )
-
-
-with col2:
-
-    st.metric(
-        "RAM Usage",
-        f"{ram:.1f}%"
-    )
-
-
-with col3:
-
-    st.metric(
-        "Disk Usage",
-        f"{disk:.1f}%"
-    )
-
-
-with col4:
-
-    st.metric(
-        "Upload Speed",
-        f"{upload_kbps:.1f} KB/s"
-    )
-
-
-with col5:
-
-    st.metric(
-        "Download Speed",
-        f"{download_kbps:.1f} KB/s"
-    )
-
-
-st.divider()
-
-
-# ==================================================
-# SYSTEM ALERT
-# ==================================================
-
-st.subheader(
-    "🚨 System Alert"
-)
-
-
-if risk_level == "CRITICAL":
-
-    st.error(
-        "CRITICAL: Immediate attention required."
-    )
+if alerts:
 
     for alert in alerts:
 
-        st.write(
-            "•",
+        st.warning(
             alert
         )
-
-
-elif risk_level == "WARNING":
-
-    st.warning(
-        "WARNING: System resources are under high load."
-    )
-
-    for alert in alerts:
-
-        st.write(
-            "•",
-            alert
-        )
-
 
 else:
 
     st.success(
-        "NORMAL: System resources are operating normally."
-    )
-
-    st.write(
-        "No significant system issues detected."
+        "✓ No active alerts. System is operating normally."
     )
 
 
-st.divider()
+# ============================================================
+# PERFORMANCE
+# ============================================================
 
-
-# ==================================================
-# AI SYSTEM ANALYSIS
-# ==================================================
-
-st.subheader(
-    "🤖 AI System Analysis"
+st.header(
+    "📈 Performance Trends"
 )
 
-
-col1, col2, col3 = st.columns(3)
-
-
-with col1:
-
-    if prediction is not None:
-
-        st.metric(
-            "Predicted CPU in 5 Minutes",
-            f"{prediction:.1f}%"
-        )
-
-    else:
-
-        st.warning(
-            "CPU prediction unavailable."
-        )
-
-
-with col2:
-
-    st.metric(
-        "Anomaly Detection",
-        anomaly_status
-    )
-
-
-with col3:
-
-    st.metric(
-        "System Risk Level",
-        risk_level
-    )
-
-
-st.divider()
-
-
-# ==================================================
-# AI MODEL CONTROL
-# ==================================================
-
-st.subheader(
-    "🧠 AI Model Control"
+st.caption(
+    "Historical system resource utilization."
 )
 
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "CPU",
+        "Memory",
+        "Disk",
+        "Network"
+    ]
+)
 
-col1, col2, col3 = st.columns(3)
+with tab1:
+
+    st.plotly_chart(
+        resource_chart(
+            df,
+            "cpu",
+            "CPU Usage"
+        ),
+        use_container_width=True,
+        config={
+            "displayModeBar": False
+        }
+    )
+
+with tab2:
+
+    st.plotly_chart(
+        resource_chart(
+            df,
+            "ram",
+            "Memory Usage"
+        ),
+        use_container_width=True,
+        config={
+            "displayModeBar": False
+        }
+    )
+
+with tab3:
+
+    st.plotly_chart(
+        resource_chart(
+            df,
+            "disk",
+            "Disk Usage"
+        ),
+        use_container_width=True,
+        config={
+            "displayModeBar": False
+        }
+    )
+
+with tab4:
+
+    st.plotly_chart(
+        network_chart(df),
+        use_container_width=True,
+        config={
+            "displayModeBar": False
+        }
+    )
 
 
-with col1:
+# ============================================================
+# TOP PROCESSES
+# ============================================================
 
-    if os.path.exists(CPU_MODEL_FILE):
+st.header(
+    "🔥 Top CPU Processes"
+)
 
-        st.success(
-            "CPU Prediction Model: Ready"
-        )
+st.caption(
+    "Processes currently consuming the most CPU resources."
+)
 
-    else:
+process_df = get_top_processes()
 
-        st.error(
-            "CPU Prediction Model: Missing"
-        )
+if not process_df.empty:
 
+    st.dataframe(
+        process_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
 
-with col2:
+            "Process":
+                st.column_config.TextColumn(
+                    "Process"
+                ),
 
-    if os.path.exists(ANOMALY_MODEL_FILE):
+            "PID":
+                st.column_config.NumberColumn(
+                    "PID"
+                ),
 
-        st.success(
-            "Anomaly Model: Ready"
-        )
+            "CPU %":
+                st.column_config.ProgressColumn(
+                    "CPU Usage",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f%%"
+                ),
 
-    else:
+            "RAM %":
+                st.column_config.ProgressColumn(
+                    "RAM Usage",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f%%"
+                )
+        }
+    )
 
-        st.error(
-            "Anomaly Model: Missing"
-        )
-
-
-with col3:
+else:
 
     st.info(
-        f"Training Records: {len(df)}"
+        "Process information unavailable."
     )
 
 
-st.write("")
+# ============================================================
+# HISTORICAL ANALYTICS
+# ============================================================
+
+st.header(
+    "📊 Historical Analytics"
+)
+
+h1, h2, h3, h4, h5 = st.columns(5)
+
+with h1:
+
+    st.metric(
+        "Average CPU",
+        f"{df['cpu'].mean():.1f}%"
+    )
+
+with h2:
+
+    st.metric(
+        "Peak CPU",
+        f"{df['cpu'].max():.1f}%"
+    )
+
+with h3:
+
+    st.metric(
+        "Average RAM",
+        f"{df['ram'].mean():.1f}%"
+    )
+
+with h4:
+
+    st.metric(
+        "Peak RAM",
+        f"{df['ram'].max():.1f}%"
+    )
+
+with h5:
+
+    st.metric(
+        "Peak Disk",
+        f"{df['disk'].max():.1f}%"
+    )
 
 
-if st.button(
-    "🔄 Retrain AI Models",
-    use_container_width=True
+# ============================================================
+# RAW DATA
+# ============================================================
+
+with st.expander(
+    "🔍 View Recent Monitoring Data"
 ):
+
+    display_df = df.tail(25).copy()
+
+    display_df["timestamp"] = (
+        display_df["timestamp"]
+        .dt.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# AI MODEL CONTROL
+# ============================================================
+
+st.header(
+    "⚙️ AI Model Control"
+)
+
+st.caption(
+    "Retrain the prediction and anomaly detection models."
+)
+
+model_col1, model_col2 = st.columns(
+    [4, 1]
+)
+
+with model_col1:
+
+    st.info(
+        f"Training records available: {get_total_records()}"
+    )
+
+with model_col2:
+
+    retrain = st.button(
+        "🔄 Retrain Models",
+        use_container_width=True
+    )
+
+
+if retrain:
 
     with st.spinner(
         "Training AI models..."
@@ -599,631 +1310,90 @@ if st.button(
             text=True
         )
 
+        if result.returncode == 0:
 
-    if result.returncode == 0:
-
-        st.success(
-            "AI models retrained successfully!"
-        )
-
-        with st.expander(
-            "View Training Output"
-        ):
-
-            st.code(
-                result.stdout
+            st.success(
+                "AI models retrained successfully."
             )
 
-        st.rerun()
+            with st.expander(
+                "Training Output"
+            ):
 
-    else:
+                st.code(
+                    result.stdout
+                )
 
-        st.error(
-            "Model retraining failed."
-        )
+            st.cache_data.clear()
 
-        with st.expander(
-            "View Error"
-        ):
+        else:
 
-            st.code(
-                result.stderr
+            st.error(
+                "Model retraining failed."
             )
 
+            with st.expander(
+                "Error Details"
+            ):
 
-st.divider()
+                st.code(
+                    result.stderr
+                )
 
 
-# ==================================================
-# HISTORICAL PERFORMANCE
-# ==================================================
-
-st.subheader(
-    "📊 Historical Performance"
-)
-
-
-cpu_average = df["cpu"].mean()
-
-cpu_min = df["cpu"].min()
-
-cpu_max = df["cpu"].max()
-
-
-ram_average = df["ram"].mean()
-
-ram_min = df["ram"].min()
-
-ram_max = df["ram"].max()
-
-
-disk_average = df["disk"].mean()
-
-disk_min = df["disk"].min()
-
-disk_max = df["disk"].max()
-
-
-# CPU statistics
-
-st.markdown(
-    "### CPU Statistics"
-)
-
-
-col1, col2, col3 = st.columns(3)
-
-
-with col1:
-
-    st.metric(
-        "Average CPU",
-        f"{cpu_average:.1f}%"
-    )
-
-
-with col2:
-
-    st.metric(
-        "Minimum CPU",
-        f"{cpu_min:.1f}%"
-    )
-
-
-with col3:
-
-    st.metric(
-        "Maximum CPU",
-        f"{cpu_max:.1f}%"
-    )
-
-
-# RAM statistics
-
-st.markdown(
-    "### RAM Statistics"
-)
-
-
-col1, col2, col3 = st.columns(3)
-
-
-with col1:
-
-    st.metric(
-        "Average RAM",
-        f"{ram_average:.1f}%"
-    )
-
-
-with col2:
-
-    st.metric(
-        "Minimum RAM",
-        f"{ram_min:.1f}%"
-    )
-
-
-with col3:
-
-    st.metric(
-        "Maximum RAM",
-        f"{ram_max:.1f}%"
-    )
-
-
-# Disk statistics
-
-st.markdown(
-    "### Disk Statistics"
-)
-
-
-col1, col2, col3 = st.columns(3)
-
-
-with col1:
-
-    st.metric(
-        "Average Disk",
-        f"{disk_average:.1f}%"
-    )
-
-
-with col2:
-
-    st.metric(
-        "Minimum Disk",
-        f"{disk_min:.1f}%"
-    )
-
-
-with col3:
-
-    st.metric(
-        "Maximum Disk",
-        f"{disk_max:.1f}%"
-    )
-
-
-st.divider()
-
-
-# ==================================================
-# SYSTEM HEALTH
-# ==================================================
-
-st.subheader(
-    "🩺 Overall System Health"
-)
-
-
-health_score = 100
-
-
-if cpu >= 90:
-
-    health_score -= 30
-
-elif cpu >= 70:
-
-    health_score -= 15
-
-
-if ram >= 90:
-
-    health_score -= 30
-
-elif ram >= 80:
-
-    health_score -= 15
-
-
-if disk >= 90:
-
-    health_score -= 20
-
-
-if anomaly_status == "Anomaly Detected":
-
-    health_score -= 20
-
-
-health_score = max(
-    0,
-    min(100, health_score)
-)
-
-
-if health_score >= 80:
-
-    health_status = "Healthy"
-
-elif health_score >= 60:
-
-    health_status = "Moderate"
-
-else:
-
-    health_status = "Needs Attention"
-
-
-col1, col2 = st.columns(2)
-
-
-with col1:
-
-    st.metric(
-        "System Health Score",
-        f"{health_score}/100"
-    )
-
-
-with col2:
-
-    st.metric(
-        "Health Status",
-        health_status
-    )
-
-
-st.divider()
-
-
-# ==================================================
-# TOP PROCESSES
-# ==================================================
-
-st.subheader(
-    "📋 Top CPU-Consuming Processes"
-)
-
-
-processes = []
-
-
-for process in psutil.process_iter(
-    ["pid", "name", "memory_percent"]
-):
-
-    try:
-
-        process.cpu_percent(
-            interval=None
-        )
-
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.ZombieProcess
-    ):
-
-        continue
-
-
-time.sleep(1)
-
-
-for process in psutil.process_iter(
-    ["pid", "name", "memory_percent"]
-):
-
-    try:
-
-        process_name = process.info["name"]
-
-
-        if process_name == "System Idle Process":
-
-            continue
-
-
-        cpu_usage = process.cpu_percent(
-            interval=None
-        )
-
-
-        ram_usage = process.info[
-            "memory_percent"
-        ]
-
-
-        processes.append({
-
-            "PID": process.info["pid"],
-
-            "Process": process_name,
-
-            "CPU (%)": round(
-                cpu_usage,
-                1
-            ),
-
-            "RAM (%)": round(
-                ram_usage,
-                1
-            )
-
-        })
-
-
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.ZombieProcess
-    ):
-
-        continue
-
-
-processes.sort(
-    key=lambda x: x["CPU (%)"],
-    reverse=True
-)
-
-
-top_processes = processes[:10]
-
-
-if top_processes:
-
-    process_df = pd.DataFrame(
-        top_processes
-    )
-
-    st.dataframe(
-        process_df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-else:
-
-    st.info(
-        "No process information available."
-    )
-
-
-st.divider()
-
-
-# ==================================================
-# CPU GRAPH
-# ==================================================
-
-st.subheader(
-    "📈 CPU Usage"
-)
-
-
-cpu_fig = go.Figure()
-
-
-cpu_fig.add_trace(
-    go.Scatter(
-        x=df["timestamp"],
-        y=df["cpu"],
-        mode="lines",
-        name="CPU Usage"
-    )
-)
-
-
-cpu_fig.update_layout(
-    xaxis_title="Time",
-    yaxis_title="CPU Usage (%)",
-    yaxis=dict(
-        range=[0, 100]
-    )
-)
-
-
-st.plotly_chart(
-    cpu_fig,
-    use_container_width=True
-)
-
-
-# ==================================================
-# RAM GRAPH
-# ==================================================
-
-st.subheader(
-    "📈 RAM Usage"
-)
-
-
-ram_fig = go.Figure()
-
-
-ram_fig.add_trace(
-    go.Scatter(
-        x=df["timestamp"],
-        y=df["ram"],
-        mode="lines",
-        name="RAM Usage"
-    )
-)
-
-
-ram_fig.update_layout(
-    xaxis_title="Time",
-    yaxis_title="RAM Usage (%)",
-    yaxis=dict(
-        range=[0, 100]
-    )
-)
-
-
-st.plotly_chart(
-    ram_fig,
-    use_container_width=True
-)
-
-
-# ==================================================
-# DISK GRAPH
-# ==================================================
-
-st.subheader(
-    "📈 Disk Usage"
-)
-
-
-disk_fig = go.Figure()
-
-
-disk_fig.add_trace(
-    go.Scatter(
-        x=df["timestamp"],
-        y=df["disk"],
-        mode="lines",
-        name="Disk Usage"
-    )
-)
-
-
-disk_fig.update_layout(
-    xaxis_title="Time",
-    yaxis_title="Disk Usage (%)",
-    yaxis=dict(
-        range=[0, 100]
-    )
-)
-
-
-st.plotly_chart(
-    disk_fig,
-    use_container_width=True
-)
-
-
-# ==================================================
-# NETWORK GRAPH
-# ==================================================
-
-st.subheader(
-    "🌐 Network Traffic"
-)
-
-
-if len(df) >= 2:
-
-    network_df = df.copy()
-
-    network_df["time_diff"] = (
-        network_df["timestamp"]
-        .diff()
-        .dt.total_seconds()
-    )
-
-    network_df["upload_kbps"] = (
-        network_df["bytes_sent"]
-        .diff()
-        / network_df["time_diff"]
-        / 1024
-    )
-
-    network_df["download_kbps"] = (
-        network_df["bytes_received"]
-        .diff()
-        / network_df["time_diff"]
-        / 1024
-    )
-
-    network_df = network_df.dropna()
-
-
-    network_fig = go.Figure()
-
-
-    network_fig.add_trace(
-        go.Scatter(
-            x=network_df["timestamp"],
-            y=network_df["upload_kbps"],
-            mode="lines",
-            name="Upload"
-        )
-    )
-
-
-    network_fig.add_trace(
-        go.Scatter(
-            x=network_df["timestamp"],
-            y=network_df["download_kbps"],
-            mode="lines",
-            name="Download"
-        )
-    )
-
-
-    network_fig.update_layout(
-        xaxis_title="Time",
-        yaxis_title="Speed (KB/s)"
-    )
-
-
-    st.plotly_chart(
-        network_fig,
-        use_container_width=True
-    )
-
-else:
-
-    st.info(
-        "Collecting enough network data..."
-    )
-
-
-st.divider()
-
-
-# ==================================================
-# RECENT METRICS
-# ==================================================
-
-st.subheader(
-    "📋 Recent System Metrics"
-)
-
-
-st.dataframe(
-    df[
-        [
-            "timestamp",
-            "cpu",
-            "ram",
-            "disk",
-            "bytes_sent",
-            "bytes_received"
-        ]
-    ].tail(10),
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ==================================================
+# ============================================================
 # DATABASE INFORMATION
-# ==================================================
+# ============================================================
 
-st.subheader(
+with st.expander(
     "🗄️ Database Information"
-)
+):
+
+    db1, db2, db3 = st.columns(3)
+
+    with db1:
+
+        st.metric(
+            "Total Records",
+            get_total_records()
+        )
+
+    with db2:
+
+        st.metric(
+            "Displayed Records",
+            len(df)
+        )
+
+    with db3:
+
+        st.metric(
+            "Last Update",
+            latest["timestamp"].strftime(
+                "%H:%M:%S"
+            )
+        )
 
 
-col1, col2 = st.columns(2)
+# ============================================================
+# FOOTER
+# ============================================================
 
-
-with col1:
-
-    st.metric(
-        "Total Records",
-        len(df)
-    )
-
-
-with col2:
-
-    st.write(
-        "Storage: SQLite"
-    )
-
-
-# ==================================================
-# LAST UPDATE
-# ==================================================
+st.divider()
 
 st.caption(
-    f"Last data update: "
-    f"{latest['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
+    "AI System Monitor • "
+    "Real-Time System Intelligence • "
+    "Python + SQLite + Scikit-learn + Streamlit"
 )
 
 
-# ==================================================
+# ============================================================
 # AUTO REFRESH
-# ==================================================
+# ============================================================
 
-time.sleep(5)
+time.sleep(
+    refresh_seconds
+)
 
 st.rerun()
