@@ -1,12 +1,21 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import sqlite3
 import psutil
 import os
 import subprocess
 import sys
 import time
+from database.database import get_metrics
+
+
+# ============================================================
+# AI MODEL FILES
+# ============================================================
+
+CPU_MODEL_FILE = "models/cpu_prediction_model.pkl"
+ANOMALY_MODEL_FILE = "models/anomaly_model.pkl"
+
 
 
 # ============================================================
@@ -22,171 +31,52 @@ st.set_page_config(
 
 
 # ============================================================
-# DATABASE PATHS
-# ============================================================
-
-DATABASE_FILE = "data/system_metrics.db"
-CPU_MODEL_FILE = "models/cpu_prediction_model.pkl"
-ANOMALY_MODEL_FILE = "models/anomaly_model.pkl"
-
-
-# ============================================================
-# CUSTOM STREAMLIT CSS
-# No HTML cards are used.
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-
-    .stApp {
-        background-color: #080c14;
-    }
-
-    [data-testid="stSidebar"] {
-        background-color: #0c111b;
-        border-right: 1px solid #202938;
-    }
-
-    .block-container {
-        max-width: 1500px;
-        padding-top: 2rem;
-        padding-bottom: 3rem;
-    }
-
-    h1 {
-        font-size: 2.4rem !important;
-        font-weight: 800 !important;
-    }
-
-    h2 {
-        font-size: 1.5rem !important;
-        font-weight: 750 !important;
-    }
-
-    h3 {
-        font-size: 1.1rem !important;
-        font-weight: 700 !important;
-    }
-
-    div[data-testid="stMetric"] {
-        background-color: #111722;
-        border: 1px solid #273244;
-        border-radius: 16px;
-        padding: 18px;
-        min-height: 130px;
-    }
-
-    div[data-testid="stMetricLabel"] {
-        color: #94a3b8;
-    }
-
-    div[data-testid="stMetricValue"] {
-        color: #f8fafc;
-        font-weight: 800;
-    }
-
-    div[data-testid="stMetricDelta"] {
-        font-size: 0.85rem;
-    }
-
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        background-color: #0f1520;
-        border: 1px solid #202b3d;
-        border-radius: 16px;
-    }
-
-    .stButton > button {
-        border-radius: 10px;
-        min-height: 42px;
-        font-weight: 650;
-    }
-
-    .stProgress > div > div > div > div {
-        border-radius: 10px;
-    }
-
-    div[data-testid="stDataFrame"] {
-        border: 1px solid #202b3d;
-        border-radius: 14px;
-        overflow: hidden;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# ============================================================
 # DATABASE
 # ============================================================
 
-def get_connection():
-    return sqlite3.connect(DATABASE_FILE)
-
-
 @st.cache_data(ttl=3)
 def load_metrics(limit=150):
-
-    if not os.path.exists(DATABASE_FILE):
-        return pd.DataFrame()
-
-    connection = get_connection()
-
-    query = """
-        SELECT
-            timestamp,
-            cpu,
-            ram,
-            disk,
-            bytes_sent,
-            bytes_received
-        FROM system_metrics
-        ORDER BY id DESC
-        LIMIT ?
     """
+    Load monitoring data from Supabase PostgreSQL.
+    """
+    try:
+        rows = get_metrics(limit)
 
-    df = pd.read_sql_query(
-        query,
-        connection,
-        params=(limit,)
-    )
+        if not rows:
+            return pd.DataFrame()
 
-    connection.close()
+        df = pd.DataFrame(rows)
 
-    if df.empty:
+        if df.empty:
+            return df
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+        df = (
+            df.sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
         return df
 
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"]
-    )
-
-    df = df.sort_values(
-        "timestamp"
-    ).reset_index(drop=True)
-
-    return df
+    except Exception as e:
+        st.error(f"Supabase database error: {e}")
+        return pd.DataFrame()
 
 
 def get_total_records():
+    """
+    Get the total number of records currently available
+    in Supabase.
 
-    if not os.path.exists(DATABASE_FILE):
+    The database module currently exposes get_metrics(),
+    so this reads the available records for the dashboard.
+    """
+    try:
+        rows = get_metrics(100000)
+        return len(rows)
+    except Exception:
         return 0
-
-    connection = get_connection()
-
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM system_metrics"
-    )
-
-    result = cursor.fetchone()[0]
-
-    connection.close()
-
-    return result
 
 
 # ============================================================
@@ -613,6 +503,11 @@ if df.empty:
         "No monitoring data is available."
     )
 
+    st.info(
+        "Make sure your DATABASE_URL is configured and "
+        "the monitoring script is running."
+    )
+
     st.code(
         "python -m monitoring.system_metrics",
         language="cmd"
@@ -699,18 +594,22 @@ with st.sidebar:
         get_total_records()
     )
 
-    if os.path.exists(
-        DATABASE_FILE
-    ):
+    try:
+        get_metrics(1)
 
         st.success(
-            "SQLite Connected"
+            "Supabase Connected"
+        )
+
+    except Exception:
+        st.error(
+            "Supabase Not Connected"
         )
 
     st.divider()
 
     st.caption(
-        "Python • psutil • SQLite\n"
+        "Python • psutil • Supabase\n"
         "Scikit-learn • Plotly • Streamlit"
     )
 
@@ -1287,6 +1186,11 @@ with model_col1:
         f"Training records available: {get_total_records()}"
     )
 
+    st.caption(
+         "CPU prediction and anomaly detection models can be "
+         "retrained using the current Supabase data."
+    )
+
 with model_col2:
 
     retrain = st.button(
@@ -1384,7 +1288,7 @@ st.divider()
 st.caption(
     "AI System Monitor • "
     "Real-Time System Intelligence • "
-    "Python + SQLite + Scikit-learn + Streamlit"
+    "Python + Supabase + Scikit-learn + Streamlit"
 )
 
 

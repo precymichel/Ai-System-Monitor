@@ -5,16 +5,9 @@ from datetime import datetime
 from database.database import create_database, save_metrics
 
 
-# ==================================================
-# INITIALIZE DATABASE
-# ==================================================
-
+# Create/check the Supabase table
 create_database()
 
-
-# ==================================================
-# COLLECT SYSTEM METRICS
-# ==================================================
 
 def get_system_metrics():
 
@@ -29,9 +22,7 @@ def get_system_metrics():
     network = psutil.net_io_counters()
 
     return {
-        "timestamp": datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "cpu": cpu,
         "ram": ram,
         "disk": disk_usage,
@@ -40,29 +31,21 @@ def get_system_metrics():
     }
 
 
-# ==================================================
-# START MONITORING
-# ==================================================
-
 if __name__ == "__main__":
 
+    print("======================================")
     print("AI SYSTEM MONITOR")
-    print("=================")
+    print("======================================")
 
-    print("SQLite database connected.")
-
+    print("Supabase database connected.")
     print("Collecting system data...")
-
     print("Press CTRL+C to stop.\n")
-
 
     while True:
 
         metrics = get_system_metrics()
 
-        # Save to SQLite
         save_metrics(metrics)
-
 
         print(
             f"{metrics['timestamp']} | "
@@ -71,5 +54,5 @@ if __name__ == "__main__":
             f"Disk: {metrics['disk']:.1f}%"
         )
 
-
         time.sleep(5)
+        

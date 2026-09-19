@@ -1,39 +1,55 @@
-import sqlite3
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 
-DATABASE_FILE = "data/system_metrics.db"
+def get_connection():
+    """
+    Connect to Supabase PostgreSQL database.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        raise ValueError(
+            "DATABASE_URL is not configured."
+        )
+
+    return psycopg2.connect(database_url)
 
 
 def create_database():
+    """
+    Create the system_metrics table if it does not already exist.
+    """
 
-    os.makedirs("data", exist_ok=True)
-
-    connection = sqlite3.connect(DATABASE_FILE)
-
+    connection = get_connection()
     cursor = connection.cursor()
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS system_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
+            id BIGSERIAL PRIMARY KEY,
+            timestamp TIMESTAMP DEFAULT NOW(),
             cpu REAL,
             ram REAL,
             disk REAL,
-            bytes_sent INTEGER,
-            bytes_received INTEGER
+            bytes_sent BIGINT,
+            bytes_received BIGINT
         )
     """)
 
     connection.commit()
 
+    cursor.close()
     connection.close()
 
 
 def save_metrics(metrics):
+    """
+    Save one system-metrics record to Supabase.
+    """
 
-    connection = sqlite3.connect(DATABASE_FILE)
-
+    connection = get_connection()
     cursor = connection.cursor()
 
     cursor.execute("""
@@ -45,7 +61,7 @@ def save_metrics(metrics):
             bytes_sent,
             bytes_received
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
     """, (
         metrics["timestamp"],
         metrics["cpu"],
@@ -57,14 +73,20 @@ def save_metrics(metrics):
 
     connection.commit()
 
+    cursor.close()
     connection.close()
 
 
-def get_metrics():
+def get_metrics(limit=150):
+    """
+    Get recent system metrics from Supabase.
+    """
 
-    connection = sqlite3.connect(DATABASE_FILE)
+    connection = get_connection()
 
-    cursor = connection.cursor()
+    cursor = connection.cursor(
+        cursor_factory=RealDictCursor
+    )
 
     cursor.execute("""
         SELECT
@@ -75,19 +97,13 @@ def get_metrics():
             bytes_sent,
             bytes_received
         FROM system_metrics
-        ORDER BY id
-    """)
+        ORDER BY id DESC
+        LIMIT %s
+    """, (limit,))
 
     rows = cursor.fetchall()
 
+    cursor.close()
     connection.close()
 
     return rows
-
-
-if __name__ == "__main__":
-
-    create_database()
-
-    print("SQLite database created successfully!")
-    print("Location:", DATABASE_FILE)

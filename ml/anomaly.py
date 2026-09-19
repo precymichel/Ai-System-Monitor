@@ -1,185 +1,147 @@
-import sqlite3
-import pandas as pd
-from sklearn.ensemble import IsolationForest
-import joblib
 import os
+import joblib
+import pandas as pd
+
+from sklearn.ensemble import IsolationForest
+
+from database.database import get_metrics
 
 
-DATABASE_FILE = "data/system_metrics.db"
+print("======================================")
+print("AI SYSTEM MONITOR - ANOMALY DETECTION")
+print("======================================")
 
-MODEL_FILE = "models/anomaly_model.pkl"
+
+# --------------------------------------
+# Load data from Supabase
+# --------------------------------------
+
+rows = get_metrics(100000)
+
+if not rows:
+    print("No data available in Supabase.")
+    exit()
 
 
-# ==================================================
-# LOAD DATA FROM SQLITE
-# ==================================================
+df = pd.DataFrame(rows)
 
-connection = sqlite3.connect(
-    DATABASE_FILE
+df["timestamp"] = pd.to_datetime(
+    df["timestamp"]
 )
 
-query = """
-SELECT
-    timestamp,
-    cpu,
-    ram,
-    disk
-FROM system_metrics
-ORDER BY id
-"""
-
-df = pd.read_sql_query(
-    query,
-    connection
-)
-
-connection.close()
+df = df.sort_values(
+    "timestamp"
+).reset_index(drop=True)
 
 
-# ==================================================
-# DISPLAY
-# ==================================================
-
-print(
-    "AI SYSTEM MONITOR - ANOMALY DETECTION"
-)
-
-print(
-    "--------------------------------------"
-)
+print(f"Training rows: {len(df)}")
 
 
-print(
-    "Training rows:",
-    len(df)
-)
+if len(df) < 20:
+
+    print(
+        "Not enough data for anomaly detection."
+    )
+
+    exit()
 
 
-# ==================================================
-# FEATURES
-# ==================================================
+# --------------------------------------
+# Features
+# --------------------------------------
 
 features = [
-
     "cpu",
-
     "ram",
-
     "disk"
-
 ]
-
 
 X = df[features]
 
 
-# ==================================================
-# TRAIN ISOLATION FOREST
-# ==================================================
+# --------------------------------------
+# Isolation Forest
+# --------------------------------------
 
 model = IsolationForest(
-
     n_estimators=100,
-
     contamination=0.05,
-
     random_state=42,
-
     n_jobs=1
-
 )
-
-
-print(
-    "\nTraining anomaly detection model..."
-)
-
 
 model.fit(X)
 
 
-# ==================================================
-# SAVE MODEL
-# ==================================================
+# --------------------------------------
+# Detect anomalies
+# --------------------------------------
 
-os.makedirs(
-    "models",
-    exist_ok=True
-)
+df["anomaly"] = model.predict(X)
 
 
-joblib.dump(
-    model,
-    MODEL_FILE
-)
-
-
-print(
-    "\nAnomaly detection model saved!"
-)
-
-
-print(
-    "Location:",
-    MODEL_FILE
-)
-
-
-# ==================================================
-# DETECT ANOMALIES
-# ==================================================
-
-df["anomaly"] = model.predict(
-    X
-)
-
-
-anomalies = df[
+anomaly_count = (
     df["anomaly"] == -1
-]
+).sum()
 
+
+print("\nANOMALY RESULTS")
+print("--------------------------------------")
 
 print(
-    "\nAnomaly Results"
+    f"Total records: {len(df)}"
+)
+
+print(
+    f"Anomalies detected: {anomaly_count}"
 )
 
 
-print(
-    "----------------"
-)
+# --------------------------------------
+# Recent anomalies
+# --------------------------------------
+
+recent_anomalies = df[
+    df["anomaly"] == -1
+].tail(10)
 
 
-print(
-    "Total records:",
-    len(df)
-)
+if not recent_anomalies.empty:
 
-
-print(
-    "Anomalies detected:",
-    len(anomalies)
-)
-
-
-if len(anomalies) > 0:
+    print("\nRecent anomalies:")
 
     print(
-        "\nRecent anomalies:"
-    )
-
-    print(
-        anomalies[
+        recent_anomalies[
             [
                 "timestamp",
                 "cpu",
                 "ram",
                 "disk"
             ]
-        ].tail(10)
+        ].to_string(index=False)
     )
 
-else:
 
-    print(
-        "\nNo anomalies detected."
-    )
+# --------------------------------------
+# Save model
+# --------------------------------------
+
+os.makedirs(
+    "models",
+    exist_ok=True
+)
+
+model_path = (
+    "models/anomaly_model.pkl"
+)
+
+joblib.dump(
+    model,
+    model_path
+)
+
+
+print("\nAnomaly model saved:")
+print(model_path)
+
+print("\nAnomaly detection completed successfully.")

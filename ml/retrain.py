@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 
@@ -7,16 +8,43 @@ print("AI SYSTEM MONITOR - MODEL RETRAINING")
 print("======================================")
 
 
-# ==================================================
-# TRAIN CPU PREDICTION MODEL
-# ==================================================
+# Project root directory
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+
+# Make sure child Python processes can import
+# database, ml, monitoring, etc.
+env = os.environ.copy()
+
+existing_pythonpath = env.get("PYTHONPATH", "")
+
+if existing_pythonpath:
+    env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + existing_pythonpath
+else:
+    env["PYTHONPATH"] = PROJECT_ROOT
+
+
+# ======================================
+# CPU PREDICTION MODEL
+# ======================================
 
 print("\n[1/2] Training CPU prediction model...")
 print("--------------------------------------")
 
 result = subprocess.run(
-    [sys.executable, "ml/train.py"]
+    [
+        sys.executable,
+        "-m",
+        "ml.train"
+    ],
+    cwd=PROJECT_ROOT,
+    env=env
 )
+
 
 if result.returncode != 0:
 
@@ -25,16 +53,23 @@ if result.returncode != 0:
     sys.exit(1)
 
 
-# ==================================================
-# TRAIN ANOMALY MODEL
-# ==================================================
+# ======================================
+# ANOMALY DETECTION MODEL
+# ======================================
 
 print("\n[2/2] Training anomaly detection model...")
 print("-----------------------------------------")
 
 result = subprocess.run(
-    [sys.executable, "ml/anomaly.py"]
+    [
+        sys.executable,
+        "-m",
+        "ml.anomaly"
+    ],
+    cwd=PROJECT_ROOT,
+    env=env
 )
+
 
 if result.returncode != 0:
 
@@ -43,9 +78,9 @@ if result.returncode != 0:
     sys.exit(1)
 
 
-# ==================================================
-# COMPLETE
-# ==================================================
+# ======================================
+# COMPLETED
+# ======================================
 
 print("\n======================================")
 print("MODEL RETRAINING COMPLETED")

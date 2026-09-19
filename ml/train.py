@@ -1,80 +1,48 @@
-import sqlite3
+import os
+import joblib
 import pandas as pd
+
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import joblib
-import os
+
+from database.database import get_metrics
 
 
-DATABASE_FILE = "data/system_metrics.db"
+print("======================================")
+print("AI SYSTEM MONITOR - ML TRAINING")
+print("======================================")
 
 
-# ==================================================
-# LOAD DATA FROM SQLITE
-# ==================================================
+# --------------------------------------
+# Load data from Supabase
+# --------------------------------------
 
-connection = sqlite3.connect(DATABASE_FILE)
+rows = get_metrics(100000)
 
-query = """
-SELECT
-    timestamp,
-    cpu,
-    ram,
-    disk,
-    bytes_sent,
-    bytes_received
-FROM system_metrics
-ORDER BY id
-"""
-
-df = pd.read_sql_query(
-    query,
-    connection
-)
-
-connection.close()
-
-
-# ==================================================
-# CHECK DATA
-# ==================================================
-
-print("AI SYSTEM MONITOR - CPU PREDICTION")
-print("----------------------------------")
-
-print("Total database records:", len(df))
-
-
-if len(df) < 80:
-
-    print(
-        "\nNot enough data for training."
-    )
-
-    print(
-        "Collect more system metrics first."
-    )
-
+if not rows:
+    print("No data available in Supabase.")
     exit()
 
+df = pd.DataFrame(rows)
 
-# ==================================================
-# FEATURE ENGINEERING
-# ==================================================
+df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-df["timestamp"] = pd.to_datetime(
-    df["timestamp"]
-)
+df = df.sort_values("timestamp").reset_index(drop=True)
 
 
-# Predict CPU 5 minutes into the future
-# 60 records × approximately 5 seconds = 5 minutes
+print(f"Total database records: {len(df)}")
 
-df["future_cpu"] = (
-    df["cpu"]
-    .shift(-60)
-)
 
+# --------------------------------------
+# Create future CPU target
+# --------------------------------------
+
+df["future_cpu"] = df["cpu"].shift(-60)
+
+
+# --------------------------------------
+# Feature engineering
+# --------------------------------------
 
 df["cpu_avg"] = (
     df["cpu"]
@@ -82,19 +50,16 @@ df["cpu_avg"] = (
     .mean()
 )
 
-
 df["ram_avg"] = (
     df["ram"]
     .rolling(12)
     .mean()
 )
 
-
 df["cpu_change"] = (
     df["cpu"]
     .diff()
 )
-
 
 df["ram_change"] = (
     df["ram"]
@@ -102,86 +67,60 @@ df["ram_change"] = (
 )
 
 
-df = df.dropna()
-
-
-# ==================================================
-# FEATURES
-# ==================================================
-
 features = [
-
     "cpu",
-
     "ram",
-
     "disk",
-
     "cpu_avg",
-
     "ram_avg",
-
     "cpu_change",
-
     "ram_change"
-
 ]
 
 
-X = df[features]
+df = df.dropna()
 
+
+if len(df) < 80:
+
+    print(
+        f"Not enough data for training. "
+        f"Need at least 80 usable records, got {len(df)}."
+    )
+
+    exit()
+
+
+X = df[features]
 y = df["future_cpu"]
 
 
-# ==================================================
-# TRAIN / TEST SPLIT
-# ==================================================
+# --------------------------------------
+# Time-order train/test split
+# --------------------------------------
 
-split = int(
-    len(df) * 0.8
-)
+split_index = int(len(df) * 0.8)
 
+X_train = X.iloc[:split_index]
+X_test = X.iloc[split_index:]
 
-X_train = X.iloc[:split]
-
-X_test = X.iloc[split:]
-
-
-y_train = y.iloc[:split]
-
-y_test = y.iloc[split:]
+y_train = y.iloc[:split_index]
+y_test = y.iloc[split_index:]
 
 
-print(
-    "Training samples:",
-    len(X_train)
-)
-
-print(
-    "Testing samples:",
-    len(X_test)
-)
+print(f"Training samples: {len(X_train)}")
+print(f"Testing samples: {len(X_test)}")
 
 
-# ==================================================
-# RANDOM FOREST
-# ==================================================
+# --------------------------------------
+# Train model
+# --------------------------------------
 
 model = RandomForestRegressor(
-
     n_estimators=50,
-
     random_state=42,
-
     n_jobs=1
-
 )
-
-
-print(
-    "\nTraining model..."
-)
-
 
 model.fit(
     X_train,
@@ -189,33 +128,21 @@ model.fit(
 )
 
 
-# ==================================================
-# PREDICTION
-# ==================================================
+# --------------------------------------
+# Evaluate model
+# --------------------------------------
 
-predictions = model.predict(
-    X_test
-)
-
-
-# ==================================================
-# MODEL EVALUATION
-# ==================================================
+predictions = model.predict(X_test)
 
 mae = mean_absolute_error(
     y_test,
     predictions
 )
 
-
-mse = mean_squared_error(
+rmse = mean_squared_error(
     y_test,
     predictions
-)
-
-
-rmse = mse ** 0.5
-
+) ** 0.5
 
 r2 = r2_score(
     y_test,
@@ -223,48 +150,26 @@ r2 = r2_score(
 )
 
 
-print(
-    "\nMODEL RESULTS"
-)
+print("\nMODEL RESULTS")
+print("--------------------------------------")
+
+print(f"MAE: {mae:.2f}")
+print(f"RMSE: {rmse:.2f}")
+print(f"R2: {r2:.2f}")
 
 
-print(
-    "-------------"
-)
-
-
-print(
-    "MAE :",
-    round(mae, 2)
-)
-
-
-print(
-    "RMSE:",
-    round(rmse, 2)
-)
-
-
-print(
-    "R2  :",
-    round(r2, 2)
-)
-
-
-# ==================================================
-# SAVE MODEL
-# ==================================================
+# --------------------------------------
+# Save model
+# --------------------------------------
 
 os.makedirs(
     "models",
     exist_ok=True
 )
 
-
 model_path = (
     "models/cpu_prediction_model.pkl"
 )
-
 
 joblib.dump(
     model,
@@ -272,12 +177,7 @@ joblib.dump(
 )
 
 
-print(
-    "\nModel saved successfully!"
-)
+print("\nModel saved:")
+print(model_path)
 
-
-print(
-    "Location:",
-    model_path
-)
+print("\nTraining completed successfully.")
