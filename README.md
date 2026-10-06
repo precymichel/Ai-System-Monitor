@@ -1,3 +1,5 @@
+<img width="1920" height="2880" alt="localhost(Surface Pro 10)" src="https://github.com/user-attachments/assets/f2089ee9-09ce-4266-80b6-a378c7a3844e" />
+<img width="1430" height="1100" alt="localhost" src="https://github.com/user-attachments/assets/4993b461-cf6b-4c55-991a-43c6fec0b6c9" />
 # 🤖 AI-Powered Real-Time System Monitoring & Predictive Analytics
 
 <p align="center">
