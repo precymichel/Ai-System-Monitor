@@ -21,6 +21,8 @@
 
 ![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?
 
+live website running:https://ai-system-monitor-306n.onrender.com/
+
 # 🏗️ System Architecture
 
 The project follows a complete data pipeline from real-time system monitoring
